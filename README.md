@@ -111,13 +111,14 @@ NETCHECKOUT  <-- to leave the list.
 
 BLACKLIST ADD/BLACKLIST DEL <-- needs Admin Privileges
 
-# Special Thanks to:
+SF-ON/SF-OFF  <-- Turns on (Default) or off of the Store and Forward system
 
-Ben Jackson, N1WBV for his assistance!!!!
 
 # ToDo List:
 
-I want to add a Store-Forward feature, which isn't that difficult, except can't gain the assistance of any AI to do it properly without major mission creep and unbelievable complexity.  The four major AI's have failed to achieve the goals and requirements of this feature.  Help is appreciated from real Python programmers...
+I want to add some intelligence to the system:
+a) Determine based on Last_heard method of transport whether to send the message via APRS-IS or RF
+b) Ability to request WX with zip code/City just the way "Time" or "Version" commands are sent
 
 # License (from the original)
 
