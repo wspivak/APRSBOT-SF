@@ -1,0 +1,27 @@
+import sqlite3
+
+# Connect to your SQLite database
+conn = sqlite3.connect('erli.db')
+cursor = conn.cursor()
+
+# List of callsigns
+callsigns = [
+    "N2CAZ", "N2AZA", "N5MHA", "N9VOQ", "N4JGU", "N1EQM", "N0TJP", "N1IVS", "N4JGK", "N8RPY",
+    "N7HAT", "N1FCL", "N2CPT", "N1UYA", "N3LBN", "N7SKM", "N0WIN", "N1WDP", "N0FFD", "N6NBW",
+    "N0SQF", "N6KMO", "N7YCS", "N5RLD", "N4KRA", "N5NBV", "N1ZPQ", "N8QNP", "N9GVB", "N6MUP",
+    "N0JAO", "N9UIH", "N5HEB", "N2YUQ", "N4KEM", "N3APK", "N7EJR", "N6ANP", "N7MFJ", "N8EKJ",
+    "N2YZD", "N6OYM", "N6NMZ", "N6HII", "N1QEC", "N9RXO", "N8QFD", "N9KGI", "N8BAH", "N4QIZ", "N1HPH"
+]
+
+# Current timestamp formatted as 'YYYY-MM-DD HH:MM:SS'
+formatted_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+# Insert each callsign with the formatted current datetime, ignoring duplicates
+cursor.executemany(
+    "INSERT OR IGNORE INTO blacklist (callsign, datetime) VALUES (?, ?)",
+    [(callsign, formatted_now) for callsign in callsigns]
+)
+
+# Commit and close
+conn.commit()
+conn.close()

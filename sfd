@@ -1,0 +1,321 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+import os, re, sys, time, queue, sqlite3, logging, threading, configparser
+from datetime import datetime, timedelta
+from ioreth.aprs import Handler as AprsHandler
+from ioreth.clients import AprsIsClient, RfKissClient
+
+CONFIG_FILE = os.environ.get("APRSBOT_CONF", "/opt/aprsbot/aprsbot.conf")
+LOG_PATH   = "/opt/aprsbot/logs/sf.log"
+ACK_RE = re.compile(r"^\s*ack\W*([A-Za-z0-9]+)\W*$", re.IGNORECASE)
+
+def norm(s): return (s or "").replace("*","").strip().upper()
+def base(s): s=norm(s); return s.split("-")[0] if "-" in s else s
+def utc_iso(): return datetime.utcnow().isoformat()
+
+def logger():
+    os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
+    lg = logging.getLogger("sf"); 
+    if not lg.handlers:
+        lg.setLevel(logging.INFO)
+        fh = logging.FileHandler(LOG_PATH); fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s: %(message)s"))
+        sh = logging.StreamHandler(sys.stdout); sh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s: %(message)s"))
+        lg.addHandler(fh); lg.addHandler(sh)
+    return lg
+
+def ensure_msg_schema(conn):
+    c=conn.cursor()
+    c.execute("""CREATE TABLE IF NOT EXISTS message (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        recipient TEXT NOT NULL,
+        timestamp TEXT NOT NULL,
+        message TEXT NOT NULL,
+        msgid TEXT,
+        ack INTEGER DEFAULT 0
+    )""")
+    for col, decl in (("retries","INTEGER DEFAULT 0"),("last_attempt_ts","TEXT"),
+                      ("last_error","TEXT"),("last_sent","TEXT"),("retry_count","INTEGER DEFAULT 0")):
+        try: c.execute(f"ALTER TABLE message ADD COLUMN {col} {decl}")
+        except Exception: pass
+    c.execute("CREATE TABLE IF NOT EXISTS last_heard (callsign TEXT PRIMARY KEY, timestamp TEXT)")
+    conn.commit()
+
+class SFHandler(AprsHandler):
+    def __init__(self, svc, mycall): super().__init__(callsign=mycall); self.svc=svc
+    def _log_audit(self, *a, **k): return  # silence optional audit hook if present
+    def _heard(self, src): 
+        if src: self.svc.on_heard(norm(src))
+    def on_aprs_packet(self, orig, src, payload, via=None):
+        self._heard(src); 
+        try: return super().on_aprs_packet(orig, src, payload, via)
+        except Exception as e: self.svc.log.exception("packet err: %s", e)
+    def on_aprs_message(self, source, addressee, text, origframe, msgid=None, via=None):
+        self._heard(source)
+        try:
+            dst = norm(addressee)
+            if dst in self.svc.aliases:
+                t = (text or "").strip().lower()
+                if t.startswith("sf-off"):
+                    self.svc.set_sf(False, actor=norm(source))
+                    self.svc.send_text(source, self.svc.reply_store_off())
+                    return
+                if t.startswith("sf-on"):
+                    self.svc.set_sf(True, actor=norm(source))
+                    self.svc.send_text(source, self.svc.reply_store_on())
+                    return
+                m = ACK_RE.match(t)
+                if m: self.svc.on_ack(norm(source), m.group(1))
+        except Exception as e:
+            self.svc.log.error("cmd/ack handling failed: %s", e)
+        try: return super().on_aprs_message(source, addressee, text, origframe, msgid=msgid, via=via)
+        except Exception as e: self.svc.log.exception("message err: %s", e)
+    # mark-heard on common subtypes
+    def on_aprs_status(self, *a, **k): self._heard(a[1])
+    def on_aprs_object(self, *a, **k): self._heard(a[1])
+    def on_aprs_item(self, *a, **k): self._heard(a[1])
+    def on_aprs_position_msg(self, *a, **k): self._heard(a[1])
+    def on_aprs_position_ts(self, *a, **k): self._heard(a[1])
+    def on_aprs_position_ts_msg(self, *a, **k): self._heard(a[1])
+    def on_aprs_position_wtr(self, *a, **k): self._heard(a[1])
+    def on_aprs_mic_e(self, *a, **k): self._heard(a[1])
+    def on_aprs_old_mic_e(self, *a, **k): self._heard(a[1])
+    def on_aprs_telemetry(self, *a, **k): self._heard(a[1])
+    def on_aprs_query(self, *a, **k): self._heard(a[1])
+    def on_aprs_third_party(self, *a, **k): self._heard(a[1])
+    def on_aprs_others(self, *a, **k): self._heard(a[1])
+
+class SFD:
+    def __init__(self):
+        self.log = logger()
+        cfg = configparser.ConfigParser(); cfg.optionxform = str; cfg.read(CONFIG_FILE)
+        self.cfg = cfg
+        self.mycall = norm(cfg.get("aprs","callsign", fallback="N0CALL"))
+        self.aliases = {a.strip().upper() for a in cfg.get("aprs","aliases", fallback="").split(",") if a.strip()}
+        self.aliases.add(self.mycall)
+        self.ali_base = {base(a) for a in self.aliases}
+        self.beacon_alias = norm(cfg.get("aprs","beacon_alias", fallback="ERLI"))
+        self.users_db = cfg.get("aprs","dbfile", fallback="/opt/aprsbot/erli.db").strip()
+        self.store_db = cfg.get("store_forward","store_db", fallback="/opt/aprsbot/store_forward.db").strip()
+        self.max_retries = int(cfg.get("store_forward","max_retries", fallback="3"))
+        self.resend_delay = max(int(cfg.get("store_forward","resend_delay", fallback="60")), 60)
+        self.delay_send = max(int(cfg.get("store_forward","delay_send", fallback="5")), 5)
+
+        self.msgdb = sqlite3.connect(self.store_db, timeout=5.0, check_same_thread=False)
+        ensure_msg_schema(self.msgdb)
+
+        self._sf_enabled = self._load_sf()
+        self.users=set(); self.users_base=set(); self._next_users_refresh=0.0
+        self._last_send_ts={}
+        self.seen_q=queue.Queue()
+
+        self.clients={}
+        self._init_clients()
+        self.h = SFHandler(self, self.mycall)
+
+        self.log.info("SF ready | my=%s aliases=%s SF=%s", self.mycall, ",".join(sorted(self.aliases)), self._sf_enabled)
+
+    # --- USERS.SF ---
+    def _sf_keys(self): return [self.beacon_alias, self.mycall]
+    def _db(self): return sqlite3.connect(self.users_db, timeout=5.0)
+    def _ensure_user_rows(self, conn):
+        cur=conn.cursor()
+        for key in self._sf_keys():
+            cur.execute("INSERT OR IGNORE INTO users(callsign) VALUES (?)", (norm(key),))
+        conn.commit()
+    def _load_sf(self):
+        try:
+            conn=self._db(); cur=conn.cursor()
+            for key in self._sf_keys():
+                cur.execute("SELECT SF FROM users WHERE UPPER(callsign)=?", (norm(key),))
+                row=cur.fetchone()
+                if row is not None:
+                    val = 1 if row[0] is None else int(row[0])
+                    conn.close(); return bool(val)
+            conn.close()
+        except Exception as e:
+            self.log.warning("load SF failed, defaulting to enabled: %s", e)
+        return True
+    def set_sf(self, enabled: bool, actor=""):
+        val = 1 if enabled else 0
+        try:
+            conn=self._db(); self._ensure_user_rows(conn); cur=conn.cursor()
+            for key in self._sf_keys():
+                cur.execute("UPDATE users SET SF=? WHERE UPPER(callsign)=?", (val, norm(key)))
+            conn.commit(); conn.close()
+            self._sf_enabled = enabled
+            self.log.info("SF=%s by %s; users.SF updated for %s", enabled, actor or "system", ",".join(self._sf_keys()))
+        except Exception as e:
+            self.log.error("set SF failed: %s", e)
+
+    # --- replies text ---
+    def reply_store_on(self):  return self.cfg.get("responses","store_on",  fallback="Store and Forward Turned On")
+    def reply_store_off(self): return self.cfg.get("responses","store_off", fallback="Store and Forward Turned Off")
+
+    # --- clients ---
+    def _init_clients(self):
+        # RF
+        if self.cfg.has_section("tnc_rf"):
+            try:
+                rf = RfKissClient(addr=self.cfg["tnc_rf"].get("addr"), port=int(self.cfg["tnc_rf"].get("port")))
+                rf.callsign=self.mycall
+                rf.on_recv_frame=lambda f:self._on_frame(f, False)
+                self.clients["rf"]=rf
+            except Exception as e: self.log.warning("RF init failed: %s", e)
+        # APRS-IS
+        if self.cfg.has_section("tnc_aprsis"):
+            try:
+                ais = AprsIsClient(
+                    addr=self.cfg["tnc_aprsis"].get("addr"),
+                    port=int(self.cfg["tnc_aprsis"].get("port")),
+                    callsign=self.cfg["tnc_aprsis"].get("callsign", self.mycall).strip(),
+                    passcode=self.cfg["tnc_aprsis"].get("passcode","00000").strip(),
+                    aprs_filter=self.cfg["tnc_aprsis"].get("filter","t/m").strip()
+                )
+                try:
+                    if hasattr(ais,"set_filter"): ais.set_filter(ais.aprs_filter)
+                    elif hasattr(ais,"send_filter"): ais.send_filter(ais.aprs_filter)
+                except Exception: pass
+                ais.on_recv_frame=lambda f:self._on_frame(f, True)
+                self.clients["aprsis"]=ais
+            except Exception as e: self.log.warning("APRS-IS init failed: %s", e)
+
+    def _ensure_connected(self):
+        for name,c in self.clients.items():
+            try:
+                if not c.is_connected(): c.connect(); self.log.info("%s connected: %s", name, c.is_connected())
+            except Exception as e: self.log.warning("%s connect failed: %s", name, e)
+
+    # --- frame plumbing ---
+    def _on_frame(self, frame, from_is):
+        try: self.h.handle_frame(frame, from_aprsis=from_is)
+        except Exception as e: self.log.error("frame err: %s", e)
+
+    # --- heard hook ---
+    def on_heard(self, csu):
+        if not csu: return
+        self._refresh_users()
+        b=base(csu)
+        if csu in self.users or b in self.users_base or csu in self.aliases or b in self.ali_base:
+            # record last_heard then trigger resend
+            try:
+                now=utc_iso(); cur=self.msgdb.cursor()
+                cur.execute("INSERT INTO last_heard(callsign,timestamp) VALUES(?,?) "
+                            "ON CONFLICT(callsign) DO UPDATE SET timestamp=excluded.timestamp",(csu,now))
+                self.msgdb.commit()
+            except Exception: pass
+            try: self.seen_q.put_nowait(csu)
+            except queue.Full: pass
+
+    # --- ACK handling ---
+    def on_ack(self, from_cs, msgid):
+        src=norm(from_cs); b=base(src); a="".join(ch for ch in (msgid or "").upper() if ch.isalnum())
+        cur=self.msgdb.cursor()
+        cur.execute("""SELECT id,msgid FROM message
+                       WHERE COALESCE(ack,0)=0 AND UPPER(recipient) IN (?,?)
+                       ORDER BY id DESC LIMIT 50""",(src,b))
+        rows=cur.fetchall()
+        best=None; best_score=-1
+        def score(a,m):
+            if not a or not m: return 0
+            if a==m: return 100
+            if m.endswith(a) and len(a)>=2: return 90
+            if m.startswith(a) and len(a)>=2: return 85
+            na="".join(ch for ch in a if ch.isdigit()); nm="".join(ch for ch in m if ch.isdigit())
+            if len(na)>=2 and na==nm[-3:]: return 80
+            m3="".join(ch for ch in m if ch.isalnum())[:3]
+            if len(a)==3 and a==m3: return 75
+            if len(a)>=3 and a in m: return 60
+            return 0
+        for row_id, mid in rows:
+            s=score(a,(mid or "").upper())
+            if s>best_score: best=(row_id,mid); best_score=s
+        if best:
+            cur.execute("UPDATE message SET ack=1 WHERE id=?", (best[0],)); self.msgdb.commit()
+            self.log.info("ACK matched: %s for %s -> id %s (score %s)", src,a,best[0],best_score)
+
+    # --- send / reply ---
+    def _pace(self, to):
+        last=self._last_send_ts.get(to,0.0); now=time.monotonic()
+        wait = self.delay_send - (now-last)
+        if wait>0: time.sleep(wait)
+        self._last_send_ts[to]=time.monotonic()
+    def send_text(self, to_call, text):
+        to = norm(to_call)
+        self._pace(to)
+        frame = self.h.make_aprs_msg(to, text)
+        ok=False
+        for name,cl in self.clients.items():
+            try:
+                if cl.is_connected(): cl.enqueue_frame(frame); ok=True; self.log.info("sent via %s: %s -> %s", name, to, text)
+            except Exception as e: self.log.error("send via %s failed: %s", name, e)
+        return ok
+
+    # --- pending / resend ---
+    def _eligible(self, csu):
+        cur=self.msgdb.cursor()
+        cutoff=(datetime.utcnow()-timedelta(minutes=self.resend_delay)).isoformat()
+        b=base(csu)
+        attempts="max(COALESCE(retries,0),COALESCE(retry_count,0))"
+        last="COALESCE(last_attempt_ts,last_sent,'')"
+        cur.execute(f"""SELECT id,message,msgid,{attempts} AS tries,{last} AS last_ts
+                        FROM message
+                        WHERE COALESCE(ack,0)=0
+                          AND UPPER(recipient) IN (?,?)
+                          AND {attempts} < ?
+                          AND ({last} IS NULL OR {last}='' OR {last}<?)
+                        ORDER BY id ASC""", (csu,b,self.max_retries,cutoff))
+        return cur.fetchall()
+    def _record_attempt(self, row_id, ok, err=""):
+        cur=self.msgdb.cursor(); now=utc_iso()
+        try:
+            cur.execute("""UPDATE message SET last_attempt_ts=?, last_sent=?,
+                           retries=COALESCE(retries,0)+1, retry_count=COALESCE(retry_count,0)+1,
+                           last_error=? WHERE id=?""",(now,now,("" if ok else err)[:200],row_id))
+        except sqlite3.OperationalError:
+            cur.execute("""UPDATE message SET last_attempt_ts=?, retries=COALESCE(retries,0)+1,
+                           last_error=? WHERE id=?""",(now, ("" if ok else err)[:200],row_id))
+        self.msgdb.commit()
+    def process_resends(self, csu):
+        if not self._sf_enabled: return
+        rows=self._eligible(csu)
+        if not rows: return
+        self.log.info("resend: %s has %d pending", csu, len(rows))
+        for row_id, msg, mid, *_ in rows:
+            payload=(msg or "").strip()
+            if mid: payload=f"{payload}{{{mid}}}"
+            ok=self.send_text(csu, payload)
+            self._record_attempt(row_id, ok, err=("enqueue failed" if not ok else ""))
+
+    # --- users refresh ---
+    def _refresh_users(self):
+        now=time.monotonic()
+        if now>=self._next_users_refresh:
+            s=set()
+            try:
+                conn=self._db(); cur=conn.cursor()
+                cur.execute("SELECT callsign FROM users"); s={norm(r[0]) for r in cur.fetchall() if r and r[0]}
+                conn.close()
+            except Exception: pass
+            self.users=s; self.users_base={base(x) for x in s}
+            self._sf_enabled=self._load_sf()
+            self._next_users_refresh = now + 30*60
+            self.log.info("users refreshed: %d (SF=%s)", len(self.users), self._sf_enabled)
+
+    # --- main loop ---
+    def run(self):
+        self._refresh_users(); self._ensure_connected()
+        while True:
+            for name,c in self.clients.items():
+                try: c.loop()
+                except Exception as e: self.log.error("%s loop err: %s", name, e)
+            self._refresh_users()
+            try:
+                while True:
+                    csu = self.seen_q.get_nowait()
+                    if csu: self.process_resends(csu)
+            except queue.Empty:
+                pass
+            time.sleep(0.5)
+
+def main(): SFD().run()
+if __name__=="__main__": main()

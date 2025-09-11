@@ -1,0 +1,18 @@
+[Unit]
+Description=Ioreth APRS Bot Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=wbs
+Group=wbs
+WorkingDirectory=/opt/aprsbot/
+ExecStart=/opt/aprsbot/venv/bin/python /opt/aprsbot/iorethd /opt/aprsbot/aprsbot.conf
+StandardOutput=append:/opt/aprsbot/logs/replybot.log
+StandardError=append:/opt/aprsbot/logs/replybot.err
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
