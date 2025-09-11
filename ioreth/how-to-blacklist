@@ -1,0 +1,10 @@
+INSERT INTO blacklist (callsign) VALUES ('W1XYZ');
+
+
+DELETE FROM blacklist WHERE callsign = 'W1XYZ';
+
+
+SELECT * FROM blacklist ORDER BY timestamp DESC;
+
+
+WLNK-1:
