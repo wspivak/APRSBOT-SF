@@ -19,6 +19,106 @@ import configparser
 import os
 
 # -----------------------------------------------------------------------------
+# QRZ
+# -----------------------------------------------------------------------------
+
+import xml.etree.ElementTree as ET
+import requests
+from functools import lru_cache
+
+
+
+# QRZ session cache
+_qrz_session_key = None
+
+def get_qrz_session():
+    """Get or refresh QRZ API session key."""
+    global _qrz_session_key
+    
+    if _qrz_session_key:
+        return _qrz_session_key
+    
+    # Read credentials here, inside the function
+    cfg = configparser.ConfigParser()
+    cfg.read(APRS_CONF)
+    username = cfg.get("qrz", "username", fallback="").strip()
+    password = cfg.get("qrz", "password", fallback="").strip()
+    
+    if not username or not password:
+        return None
+    
+    try:
+        url = "https://xmldata.qrz.com/xml/current/"
+        params = {"username": username, "password": password}
+        response = requests.get(url, params=params, timeout=5)
+        
+        # Strip namespace from response
+        xml_text = response.text.replace(' xmlns="http://xmldata.qrz.com"', '')
+        root = ET.fromstring(xml_text)
+        
+        session = root.find('.//Key')
+        if session is not None:
+            _qrz_session_key = session.text
+            return _qrz_session_key
+    except Exception:
+        pass
+    
+    return None
+        
+        
+@lru_cache(maxsize=256)
+def lookup_callsign_name(callsign):
+    """Look up name for a callsign from QRZ.com."""
+    if not callsign:
+        return ""
+    
+    # Strip SSID if present
+    callsign_clean = callsign.upper().split('-')[0]
+    
+    session_key = get_qrz_session()
+    if not session_key:
+        return ""
+    
+    try:
+        url = "https://xmldata.qrz.com/xml/current/"
+        params = {"s": session_key, "callsign": callsign_clean}
+        response = requests.get(url, params=params, timeout=5)
+        
+        # Strip namespace from response
+        xml_text = response.text.replace(' xmlns="http://xmldata.qrz.com"', '')
+        root = ET.fromstring(xml_text)
+        
+        # Check for session error
+        error = root.find('.//Error')
+        if error is not None:
+            # Session expired, try to refresh
+            global _qrz_session_key
+            _qrz_session_key = None
+            session_key = get_qrz_session()
+            if session_key:
+                params["s"] = session_key
+                response = requests.get(url, params=params, timeout=5)
+                xml_text = response.text.replace(' xmlns="http://xmldata.qrz.com"', '')
+                root = ET.fromstring(xml_text)
+        
+        # Get name fields
+        fname = root.find('.//fname')
+        name = root.find('.//name')
+        
+        # Combine first name and full name
+        if fname is not None and fname.text and name is not None and name.text:
+            return f"{fname.text} {name.text}"
+        elif name is not None and name.text:
+            return name.text
+        elif fname is not None and fname.text:
+            return fname.text
+    except Exception:
+        pass
+    
+    return ""
+    
+    
+# -----------------------------------------------------------------------------
 # App & Config
 # -----------------------------------------------------------------------------
 app = Flask(__name__)
@@ -34,6 +134,13 @@ ET_ZONE = timezone("America/New_York")
 _cfg = configparser.ConfigParser()
 _cfg.read(APRS_CONF)
 STORE_DB = _cfg.get("store_forward", "store_db", fallback="/opt/aprsbot/store_forward.db")
+
+# Add near the top with other config
+QRZ_USERNAME = _cfg.get("qrz", "username", fallback="").strip()
+QRZ_PASSWORD = _cfg.get("qrz", "password", fallback="").strip()
+
+# Add this debug line
+print(f"🔑 QRZ configured: user={bool(QRZ_USERNAME)}, pass={bool(QRZ_PASSWORD)}")
 
 # -----------------------------------------------------------------------------
 # Helpers
@@ -430,7 +537,7 @@ def dashboard_html():
             delivery_summary = []
             for msgid, total, acked, maxed, timestamp in delivery_rows:
                 if acked == total:
-                    status = "✅ Fully ACK’d"
+                    status = "✅ Fully ACK'd"
                 elif acked > 0:
                     status = "⚠️ Partial ACK"
                 elif acked == 0 and maxed > 0:
@@ -574,7 +681,14 @@ def dashboard_html():
                     "max_retries": max(p[2] for p in pending_summary[recipient]),
                 }
             )
-
+        
+        # QRZ - Look up names for recipients
+        recipient_names = {}
+        for recipient in pending_details.keys():
+            name = lookup_callsign_name(recipient)
+            if name:
+                recipient_names[recipient] = name
+        
         html_template = """
         <!DOCTYPE html>
         <html>
@@ -625,7 +739,7 @@ def dashboard_html():
                     <th>Queued At</th>
                     <th>Age</th>
                     <th>Recipients</th>
-                    <th>ACK’d</th>
+                    <th>ACK'd</th>
                     <th>Maxed Retries</th>
                     <th>Status</th>
                 </tr>
@@ -646,9 +760,9 @@ def dashboard_html():
             <h2>📦 Pending Messages by Recipient</h2>
             <h5>Last Sent → first or any transmission
             <BR>
-             Last ReSent → only populated if it’s actually been retried (retries > 0)</h5>
+             Last ReSent → only populated if it's actually been retried (retries > 0)</h5>
             {% for recipient, messages in pending_details.items() %}
-            <h3>{{ recipient }}</h3>
+            <h3>{{ recipient }}{% if recipient_names.get(recipient) %} - {{ recipient_names[recipient] }}{% endif %}</h3>
             <table>
                 <tr>
                     <th>#</th>
@@ -674,7 +788,7 @@ def dashboard_html():
                     <td>{{ msg.attempts }}</td>
                 </tr>
                 {% endfor %}
-                            </table>
+            </table>
             {% endfor %}
         </body>
         </html>
@@ -685,11 +799,13 @@ def dashboard_html():
             dashboard=dashboard,
             delivery_summary=delivery_summary,
             pending_details=pending_details,
+            recipient_names=recipient_names,
             timestamp=datetime.now(ET_ZONE).strftime("%Y-%m-%d %H:%M:%S %Z"),
         )
     except Exception as e:
         app.logger.error(f"🚨 ERROR in /dashboard.html: {e}")
         return "<h1>Internal Server Error</h1>", 500
+
 
 
 # -----------------------------------------------------------------------------
