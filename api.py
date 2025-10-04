@@ -620,6 +620,7 @@ def dashboard_html():
             <h2>📬 Message Delivery Summary</h2>
             <table>
                 <tr>
+                    <th>#</th>
                     <th>MsgID</th>
                     <th>Queued At</th>
                     <th>Age</th>
@@ -630,6 +631,7 @@ def dashboard_html():
                 </tr>
                 {% for row in delivery_summary %}
                 <tr class="{% if row.status.startswith('✅') %}fresh{% elif row.status.startswith('❌') %}stale{% else %}neutral{% endif %}">
+                    <td>{{ loop.index }}</td>
                     <td>{{ row.msgid }}</td>
                     <td>{{ row.timestamp }}</td>
                     <td>{{ row.age }}</td>
@@ -649,6 +651,7 @@ def dashboard_html():
             <h3>{{ recipient }}</h3>
             <table>
                 <tr>
+                    <th>#</th>
                     <th>MsgID</th>
                     <th>Message</th>
                     <th>Queued At</th>
@@ -660,6 +663,7 @@ def dashboard_html():
                 </tr>
                 {% for msg in messages %}
                 <tr>
+                    <td>{{ loop.index }}</td>
                     <td>{{ msg.msgid }}</td>
                     <td>{{ msg.message }}</td>
                     <td>{{ msg.timestamp }}</td>
