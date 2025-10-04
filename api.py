@@ -8,7 +8,7 @@ APRS Store-Forward API
 - Times shown in America/New_York on the HTML dashboard
 """
 
-from flask import Flask, jsonify, render_template_string
+from flask import Flask, jsonify, render_template_string, request
 from flask_cors import CORS
 import sqlite3
 import re
@@ -336,6 +336,64 @@ def get_dashboard_json():
         return jsonify({"error": "Internal server error"}), 500
 
 
+@app.route('/texts', methods=['GET'])
+def get_texts():
+    try:
+        with _connect(STORE_DB) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute('SELECT * FROM texts ORDER BY created_ts DESC')
+            texts = [dict(row) for row in cursor.fetchall()]
+        return jsonify({'texts': texts})
+    except Exception as e:
+        app.logger.error(f"🚨 ERROR in /texts GET: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/texts', methods=['POST'])
+def create_text():
+    try:
+        data = request.get_json()
+        with _connect(STORE_DB) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO texts (text, enabled, weight, min_gap_days, sent_count, created_ts, updated_ts)
+                VALUES (?, ?, ?, ?, 0, datetime('now'), datetime('now'))
+            ''', (data['text'], data['enabled'], data['weight'], data['min_gap_days']))
+            conn.commit()
+        return jsonify({'success': True}), 201
+    except Exception as e:
+        app.logger.error(f"🚨 ERROR in /texts POST: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/texts/<int:text_id>', methods=['PUT'])
+def update_text(text_id):
+    try:
+        data = request.get_json()
+        with _connect(STORE_DB) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                UPDATE texts 
+                SET text=?, enabled=?, weight=?, min_gap_days=?, updated_ts=datetime('now')
+                WHERE id=?
+            ''', (data['text'], data['enabled'], data['weight'], data['min_gap_days'], text_id))
+            conn.commit()
+        return jsonify({'success': True})
+    except Exception as e:
+        app.logger.error(f"🚨 ERROR in /texts PUT: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/texts/<int:text_id>', methods=['DELETE'])
+def delete_text(text_id):
+    try:
+        with _connect(STORE_DB) as conn:
+            cursor = conn.cursor()
+            cursor.execute('DELETE FROM texts WHERE id=?', (text_id,))
+            conn.commit()
+        return jsonify({'success': True})
+    except Exception as e:
+        app.logger.error(f"🚨 ERROR in /texts DELETE: {e}")
+        return jsonify({'error': str(e)}), 500
+
 @app.route("/dashboard.html")
 def dashboard_html():
     """
@@ -540,6 +598,7 @@ def dashboard_html():
             <p>Updated: {{ timestamp }}</p>
             <table>
                 <tr>
+                    <th>#</th>
                     <th>Recipient</th>
                     <th>Last Heard</th>
                     <th>Pending</th>
@@ -548,6 +607,7 @@ def dashboard_html():
                 </tr>
                 {% for row in dashboard %}
                 <tr class="{{ 'stale' if row.last_heard == 'never' else 'fresh' }}">
+                    <td>{{ loop.index }}</td>
                     <td>{{ row.recipient }}</td>
                     <td>{{ row.last_heard }}</td>
                     <td>{{ row.pending_count }}</td>
