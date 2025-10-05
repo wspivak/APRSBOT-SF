@@ -533,7 +533,47 @@ class BotAprsHandler(aprs.Handler):
         if actual == "time":
             self.send_aprs_msg(clean_source, "Localtime is " + time.strftime("%Y-%m-%d %H:%M:%S UTC%Z"))
             return True
-
+            
+            
+# Weather forecast command
+        if actual in ["wx", "weather", "forecast"]:
+            if not args:
+                self.send_aprs_msg(clean_source, "Usage: wx <zipcode> or wx <city,state>")
+                return True
+            
+            try:
+                # Import weather module (lazy load)
+                from .weather import WeatherForecast
+                
+                # Get API key from config if available
+                api_key = None
+                # Re-read config to get weather section
+                cfg = configparser.ConfigParser(inline_comment_prefixes=(';', '#'))
+                cfg.optionxform = str
+                cfg.read(self._config_file)
+                
+                if cfg.has_section("weather"):
+                    api_key = cfg.get("weather", "openweathermap_api_key", fallback=None)
+                    if api_key:
+                        api_key = api_key.strip() or None
+                
+                # Create weather service and get forecast
+                wx_service = WeatherForecast(openweathermap_api_key=api_key)
+                forecast = wx_service.get_forecast(args)
+                
+                self.send_aprs_msg(clean_source, forecast)
+                return True
+                
+            except ImportError as e:
+                logger.error(f"Weather module not found: {e}")
+                self.send_aprs_msg(clean_source, "Weather service not available")
+                return False
+            except Exception as e:
+                logger.error(f"Weather command error: {e}", exc_info=True)
+                self.send_aprs_msg(clean_source, "Weather service error. Try again later.")
+                return False
+                
+                
         if actual.lower() == "netusers":
             cur = self.db.cursor()
             cur.execute("SELECT callsign FROM users ORDER BY timestamp DESC LIMIT 10")
