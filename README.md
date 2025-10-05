@@ -113,12 +113,15 @@ BLACKLIST ADD/BLACKLIST DEL <-- needs Admin Privileges
 
 SF-ON/SF-OFF  <-- Turns on (Default) or off of the Store and Forward system
 
+wx or weather or forecast <-- Enter your zip code or City, State or City, Country
+To test your API, configure WXTEST_debug.py with the API you received (also don't forget aprsbot.conf).
+
 
 # ToDo List:
 
 I want to add some intelligence to the system:
 a) Determine based on Last_heard method of transport whether to send the message via APRS-IS or RF
-b) Ability to request WX with zip code/City just the way "Time" or "Version" commands are sent
+
 
 # License (from the original)
 
