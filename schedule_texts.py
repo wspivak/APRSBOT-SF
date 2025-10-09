@@ -29,13 +29,18 @@ def load_config(path=CONF_FILE):
 # -----------------------------
 # Fetch eligible texts
 # -----------------------------
-def fetch_enabled_texts(conn):
-    """Return eligible texts (enabled + cooldown passed)"""
+def fetch_enabled_texts(conn, mode):
+    """Return eligible texts (enabled + cooldown passed if in coverage mode)"""
     cur = conn.cursor()
     cur.execute("SELECT * FROM texts WHERE enabled=1")
     rows = cur.fetchall()
+    
+    # In fixed mode, ignore cooldowns - just return all enabled texts
+    if mode == "fixed":
+        return rows
+    
+    # In coverage mode, respect cooldowns
     eligible = []
-
     now = datetime.utcnow()  # naive UTC
 
     for r in rows:
@@ -75,13 +80,15 @@ def schedule_fixed(texts, num_messages, start_hour, end_hour):
 
     # Limit num_messages to number of future hours
     num_to_schedule = min(num_messages, len(future_hours))
-    selected_texts = texts[:num_to_schedule] if len(texts) >= num_to_schedule else texts
+    
+    # Randomly select messages and shuffle them
+    selected_texts = random.sample(texts, min(num_to_schedule, len(texts)))
 
     # Shuffle hours to randomize
     random.shuffle(future_hours)
     schedule = []
 
-    for text, hour in zip(selected_texts, future_hours):
+    for text, hour in zip(selected_texts, future_hours[:num_to_schedule]):
         minute = random.randint(3,57)
         send_time = today.replace(hour=hour, minute=minute)
         # Ensure send_time is in the future
@@ -124,7 +131,7 @@ def schedule_coverage(texts, coverage_days, coverage_pct, max_per_day=None):
     return scheduled
 
 # -----------------------------
-# Update min_gap_days based on mode and total messages (NEW ROUTINE)
+# Update min_gap_days based on mode and total messages
 # -----------------------------
 def update_min_gap_days(conn, mode, config_data):
     """
@@ -203,10 +210,11 @@ def main(dry_run=False):
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
 
-    # NEW: Update min_gap_days before fetching texts
+    # Update min_gap_days (for reference, but not used in fixed mode)
     update_min_gap_days(conn, mode, cfg)
     
-    texts = fetch_enabled_texts(conn)
+    # Fetch texts - cooldown ignored in fixed mode
+    texts = fetch_enabled_texts(conn, mode)
     if not texts:
         print("No eligible texts to schedule.")
         return
