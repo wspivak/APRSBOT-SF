@@ -66,7 +66,7 @@ def fetch_enabled_texts(conn, mode):
 def schedule_fixed(texts, num_messages, start_hour, end_hour):
     """
     Fixed mode: assign one message per hour within remaining hours today.
-    Any messages beyond remaining hours are ignored.
+    Prioritizes messages that haven't been sent recently (or ever).
     """
     now = datetime.utcnow()
     today = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -81,8 +81,17 @@ def schedule_fixed(texts, num_messages, start_hour, end_hour):
     # Limit num_messages to number of future hours
     num_to_schedule = min(num_messages, len(future_hours))
     
-    # Randomly select messages and shuffle them
-    selected_texts = random.sample(texts, min(num_to_schedule, len(texts)))
+    # Sort by last_sent_ts (None/oldest first) to prioritize unsent/old messages
+    sorted_texts = sorted(texts, key=lambda t: (
+        t["last_sent_ts"] is not None,  # None sorts first (never sent)
+        t["last_sent_ts"] or ""         # Then by timestamp (oldest first)
+    ))
+    
+    # Take the N oldest messages
+    selected_texts = sorted_texts[:num_to_schedule]
+    
+    # Randomize the order they're sent today
+    random.shuffle(selected_texts)
 
     # Shuffle hours to randomize
     random.shuffle(future_hours)
