@@ -116,6 +116,7 @@ SF-ON/SF-OFF  <-- Turns on (Default) or off of the Store and Forward system
 wx or weather or forecast <-- Enter your zip code or City, State or City, Country
 To test your API, configure WXTEST_debug.py with the API you received (also don't forget aprsbot.conf).
 
+rel or release <--- Immediate release of all stored messages regardless of restrictions
 
 # ToDo List:
 
