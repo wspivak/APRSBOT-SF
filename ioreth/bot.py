@@ -364,6 +364,23 @@ class BotAprsHandler(aprs.Handler):
         cur.execute("SELECT SF FROM users WHERE callsign = ?", (cs,))
         row = cur.fetchone()
         return 1 if row is None else (1 if int(row[0]) == 1 else 0)
+        
+    def _trigger_sf_resend(self, callsign: str):
+        """Trigger store-forward daemon to check for messages by updating last_heard."""
+        try:
+            sf_conn = sqlite3.connect(SF_DB_PATH)
+            sf_cur = sf_conn.cursor()
+            now_iso = datetime.utcnow().isoformat()
+            sf_cur.execute("""
+                INSERT INTO last_heard(callsign, timestamp, via) 
+                VALUES(?, ?, 'RELEASE')
+                ON CONFLICT(callsign) DO UPDATE SET timestamp=excluded.timestamp, via='RELEASE'
+            """, (callsign.upper(), now_iso))
+            sf_conn.commit()
+            sf_conn.close()
+            logger.info(f"[RELEASE] Updated last_heard for {callsign} to trigger SF resend")
+        except Exception as e:
+            logger.error(f"[RELEASE] Failed to update last_heard: {e}")
 
     # ---------------- inbound path ----------------
     def on_aprs_message(self, source, addressee, text, origframe, msgid=None, via=None):
@@ -675,10 +692,13 @@ class BotAprsHandler(aprs.Handler):
                 return False
 
 
-        # RELEASE command - force immediate resend of stored messages
+# RELEASE command - force immediate resend of stored messages
         if actual == "release":
+            # Use base callsign for user lookup (strip SSID)
+            base_cs = clean_source.upper().split("-")[0]
+            
             cur = self.db.cursor()
-            cur.execute("SELECT 1 FROM users WHERE callsign = ?", (clean_source,))
+            cur.execute("SELECT 1 FROM users WHERE callsign = ?", (clean_source.upper(),))
             if not cur.fetchone():
                 self.send_aprs_msg(clean_source, f"You're not registered on {self.netname}. Send 'CQ {self.netname} <msg>' first.")
                 self._log_audit(
@@ -699,12 +719,12 @@ class BotAprsHandler(aprs.Handler):
                 sf_conn = sqlite3.connect(SF_DB_PATH)
                 sf_cur = sf_conn.cursor()
                 
-                # Count pending messages for this user
+                # Count pending messages for this user (check both full call and base)
                 sf_cur.execute("""
                     SELECT COUNT(*) FROM message 
-                    WHERE UPPER(recipient) = ? 
+                    WHERE (UPPER(recipient) = ? OR UPPER(recipient) = ?)
                     AND COALESCE(ack, 0) = 0
-                """, (clean_source.upper(),))
+                """, (clean_source.upper(), base_cs))
                 count = sf_cur.fetchone()[0]
                 
                 if count == 0:
@@ -718,14 +738,19 @@ class BotAprsHandler(aprs.Handler):
                 sf_cur.execute("""
                     UPDATE message 
                     SET last_attempt_ts = ?
-                    WHERE UPPER(recipient) = ? 
+                    WHERE (UPPER(recipient) = ? OR UPPER(recipient) = ?)
                     AND COALESCE(ack, 0) = 0
-                """, (old_timestamp, clean_source.upper()))
+                """, (old_timestamp, clean_source.upper(), base_cs))
+                
+                affected = sf_cur.rowcount
                 sf_conn.commit()
                 sf_conn.close()
                 
-                self.send_aprs_msg(clean_source, f"Release: {count} message(s) queued for immediate delivery.")
-                logger.info(f"[RELEASE] {clean_source} triggered resend of {count} message(s)")
+                # Trigger SF daemon to process immediately
+                self._trigger_sf_resend(base_cs)
+                
+                self.send_aprs_msg(clean_source, f"Release: {affected} message(s) queued for delivery.", is_ack=True)
+                logger.info(f"[RELEASE] {clean_source} triggered resend of {affected} message(s)")
                 
                 self._log_audit(
                     direction="recv",
@@ -734,13 +759,13 @@ class BotAprsHandler(aprs.Handler):
                     message=text,
                     msgid=None,
                     rejected=False,
-                    note=f"RELEASE command: {count} messages queued",
+                    note=f"RELEASE command: {affected} messages queued",
                     transport=_classify_transport(via) if via else "RF"
                 )
                 return True
                 
             except Exception as e:
-                logger.error(f"[RELEASE] Failed for {clean_source}: {e}")
+                logger.error(f"[RELEASE] Failed for {clean_source}: {e}", exc_info=True)
                 self.send_aprs_msg(clean_source, "Release failed. Try again later.")
                 return False
                 
