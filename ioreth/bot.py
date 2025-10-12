@@ -8,7 +8,7 @@ import re
 import random
 import sqlite3
 import difflib
-from datetime import datetime
+from datetime import datetime, timedelta
 import signal
 import threading
 import hashlib
@@ -157,6 +157,7 @@ class BotAprsHandler(aprs.Handler):
         self.KNOWN_COMMANDS.setdefault("help", "help")
         self.KNOWN_COMMANDS.setdefault("sf-on", "sf-on")
         self.KNOWN_COMMANDS.setdefault("sf-off", "sf-off")
+        self.KNOWN_COMMANDS.setdefault("release", "release")
 
         # beacon text
         self.beacon_message_template = cfg.get("aprs", "beacon_message", fallback="APRS Bot active").strip()
@@ -673,6 +674,76 @@ class BotAprsHandler(aprs.Handler):
         
                 return False
 
+
+        # RELEASE command - force immediate resend of stored messages
+        if actual == "release":
+            cur = self.db.cursor()
+            cur.execute("SELECT 1 FROM users WHERE callsign = ?", (clean_source,))
+            if not cur.fetchone():
+                self.send_aprs_msg(clean_source, f"You're not registered on {self.netname}. Send 'CQ {self.netname} <msg>' first.")
+                self._log_audit(
+                    direction="recv",
+                    source=clean_source,
+                    destination=self.callsign,
+                    message=text,
+                    msgid=None,
+                    rejected=True,
+                    note="RELEASE attempt by unregistered user",
+                    transport=_classify_transport(via) if via else "RF"
+                )
+                return False
+            
+            # Trigger immediate resend by updating store_forward.db timestamps
+            try:
+                self._ensure_sf_table()
+                sf_conn = sqlite3.connect(SF_DB_PATH)
+                sf_cur = sf_conn.cursor()
+                
+                # Count pending messages for this user
+                sf_cur.execute("""
+                    SELECT COUNT(*) FROM message 
+                    WHERE UPPER(recipient) = ? 
+                    AND COALESCE(ack, 0) = 0
+                """, (clean_source.upper(),))
+                count = sf_cur.fetchone()[0]
+                
+                if count == 0:
+                    self.send_aprs_msg(clean_source, "No stored messages pending.")
+                    sf_conn.close()
+                    return True
+                
+                # Reset last_attempt_ts to force immediate eligibility
+                # Set to a timestamp old enough to bypass resend_delay
+                old_timestamp = (datetime.utcnow() - timedelta(hours=24)).isoformat()
+                sf_cur.execute("""
+                    UPDATE message 
+                    SET last_attempt_ts = ?
+                    WHERE UPPER(recipient) = ? 
+                    AND COALESCE(ack, 0) = 0
+                """, (old_timestamp, clean_source.upper()))
+                sf_conn.commit()
+                sf_conn.close()
+                
+                self.send_aprs_msg(clean_source, f"Release: {count} message(s) queued for immediate delivery.")
+                logger.info(f"[RELEASE] {clean_source} triggered resend of {count} message(s)")
+                
+                self._log_audit(
+                    direction="recv",
+                    source=clean_source,
+                    destination=self.callsign,
+                    message=text,
+                    msgid=None,
+                    rejected=False,
+                    note=f"RELEASE command: {count} messages queued",
+                    transport=_classify_transport(via) if via else "RF"
+                )
+                return True
+                
+            except Exception as e:
+                logger.error(f"[RELEASE] Failed for {clean_source}: {e}")
+                self.send_aprs_msg(clean_source, "Release failed. Try again later.")
+                return False
+                
     # ---------------- outbound helpers ----------------
     def beacon_as_botnet(self, text=None):
         if text is None:
