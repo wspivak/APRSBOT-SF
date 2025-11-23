@@ -89,6 +89,16 @@ Added a db to keep deduplication persistent over bot reboots.
 
 Relaybot.service to automatically start (on my system I had to run python in a virtual environment)
 
+<b>API.PY</b>
+
+Permits, using Gunicon, to have multiple pages:
+1) APRS Bot Log
+2) List of Users, links to their QRZ page
+3) Blackliast
+4) User Modification & Blacklist page (Password Protected)
+5) Dashboard for Store-Forward
+
+
 To create or delete ADMINS, I have remvoed this facility.  I suggest you use sqlite3 and use
 a) To Add:
     "INSERT OR IGNORE INTO admins (callsign) VALUES (?)"
