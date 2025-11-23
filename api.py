@@ -806,6 +806,345 @@ def dashboard_html():
         app.logger.error(f"🚨 ERROR in /dashboard.html: {e}")
         return "<h1>Internal Server Error</h1>", 500
 
+# -----------------------------------------------------------------------------
+Bot Users Modification and Blacklisting (usernane/password protected)
+# -----------------------------------------------------------------------------
+
+
+
+from functools import wraps
+from flask import request, Response
+
+def check_auth(username, password):
+    """Check if username/password is valid."""
+    # Read from config or hardcode
+    valid_user = _cfg.get("admin", "username", fallback="admin")
+    valid_pass = _cfg.get("admin", "password", fallback="changeme")
+    return username == valid_user and password == valid_pass
+
+def requires_auth(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        auth = request.authorization
+        if not auth or not check_auth(auth.username, auth.password):
+            return Response(
+                'Authentication required', 401,
+                {'WWW-Authenticate': 'Basic realm="Login Required"'})
+        return f(*args, **kwargs)
+    return decorated
+
+
+@app.route("/edit-users.html")
+def users_html():
+    """User management interface for users and blacklist tables."""
+    try:
+        with _connect(DB_FILE) as conn:
+            cur = conn.cursor()
+
+            # Get all users
+            cur.execute("""
+                SELECT callsign, timestamp, COALESCE(SF, 1) AS SF
+                FROM users
+                ORDER BY callsign ASC
+            """)
+            users = [{"callsign": r[0], "timestamp": r[1], "sf": bool(r[2])} for r in cur.fetchall()]
+
+            # Get blacklist
+            cur.execute("""
+                SELECT callsign, timestamp
+                FROM blacklist
+                ORDER BY callsign ASC
+            """)
+            blacklist = [{"callsign": r[0], "timestamp": r[1]} for r in cur.fetchall()]
+
+        html_template = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>APRS User Management</title>
+            <style>
+                body { font-family: Arial, sans-serif; margin: 20px; }
+                table { border-collapse: collapse; width: 100%; margin-bottom: 40px; }
+                th, td { border: 1px solid #ccc; padding: 8px; text-align: left; }
+                th { background-color: #f2f2f2; }
+                .actions button { margin-right: 5px; }
+                .form-section {
+                    background-color: #f9f9f9;
+                    padding: 20px;
+                    margin-bottom: 30px;
+                    border-radius: 5px;
+                }
+                input[type="text"], input[type="checkbox"] {
+                    padding: 5px;
+                    margin: 5px;
+                }
+                button {
+                    padding: 8px 15px;
+                    cursor: pointer;
+                    background-color: #4CAF50;
+                    color: white;
+                    border: none;
+                    border-radius: 3px;
+                }
+                button:hover { background-color: #45a049; }
+                .delete-btn { background-color: #f44336; }
+                .delete-btn:hover { background-color: #da190b; }
+                .blacklist-btn { background-color: #ff9800; }
+                .blacklist-btn:hover { background-color: #e68900; }
+                h2 { margin-top: 40px; }
+                .error { color: red; }
+                .success { color: green; }
+            </style>
+            <script>
+                async function addUser() {
+                    const callsign = document.getElementById('new-callsign').value.trim().toUpperCase();
+                    const sf = document.getElementById('new-sf').checked ? 1 : 0;
+
+                    if (!callsign) {
+                        alert('Please enter a callsign');
+                        return;
+                    }
+
+                    try {
+                        const response = await fetch('/api/users', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({callsign: callsign, sf: sf})
+                        });
+
+                        const result = await response.json();
+                        if (result.success) {
+                            alert('User added successfully');
+                            location.reload();
+                        } else {
+                            alert('Error: ' + (result.error || 'Unknown error'));
+                        }
+                    } catch (e) {
+                        alert('Error: ' + e.message);
+                    }
+                }
+
+                async function editUser(callsign, currentSF) {
+                    const newSF = prompt('Store & Forward enabled? (1=Yes, 0=No)', currentSF ? '1' : '0');
+                    if (newSF === null) return;
+
+                    const sf = parseInt(newSF) === 1 ? 1 : 0;
+
+                    try {
+                        const response = await fetch('/api/users/' + encodeURIComponent(callsign), {
+                            method: 'PUT',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({sf: sf})
+                        });
+
+                        const result = await response.json();
+                        if (result.success) {
+                            alert('User updated successfully');
+                            location.reload();
+                        } else {
+                            alert('Error: ' + (result.error || 'Unknown error'));
+                        }
+                    } catch (e) {
+                        alert('Error: ' + e.message);
+                    }
+                }
+
+                async function deleteUser(callsign) {
+                    if (!confirm('Delete user ' + callsign + '?')) return;
+
+                    try {
+                        const response = await fetch('/api/users/' + encodeURIComponent(callsign), {
+                            method: 'DELETE'
+                        });
+
+                        const result = await response.json();
+                        if (result.success) {
+                            alert('User deleted successfully');
+                            location.reload();
+                        } else {
+                            alert('Error: ' + (result.error || 'Unknown error'));
+                        }
+                    } catch (e) {
+                        alert('Error: ' + e.message);
+                    }
+                }
+
+                async function addToBlacklist(callsign) {
+                    if (!confirm('Add ' + callsign + ' to blacklist?')) return;
+
+                    try {
+                        const response = await fetch('/api/blacklist', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({callsign: callsign})
+                        });
+
+                        const result = await response.json();
+                        if (result.success) {
+                            alert('Added to blacklist successfully');
+                            location.reload();
+                        } else {
+                            alert('Error: ' + (result.error || 'Unknown error'));
+                        }
+                    } catch (e) {
+                        alert('Error: ' + e.message);
+                    }
+                }
+
+                async function removeFromBlacklist(callsign) {
+                    if (!confirm('Remove ' + callsign + ' from blacklist?')) return;
+
+                    try {
+                        const response = await fetch('/api/blacklist/' + encodeURIComponent(callsign), {
+                            method: 'DELETE'
+                        });
+
+                        const result = await response.json();
+                        if (result.success) {
+                            alert('Removed from blacklist successfully');
+                            location.reload();
+                        } else {
+                            alert('Error: ' + (result.error || 'Unknown error'));
+                        }
+                    } catch (e) {
+                        alert('Error: ' + e.message);
+                    }
+                }
+            </script>
+        </head>
+        <body>
+            <h1>📡 APRS User Management</h1>
+
+            <div class="form-section">
+                <h2>Add New User</h2>
+                <input type="text" id="new-callsign" placeholder="Callsign (e.g., KC2NJV)" />
+                <label>
+                    <input type="checkbox" id="new-sf" checked /> Store & Forward Enabled
+                </label>
+                <button onclick="addUser()">Add User</button>
+            </div>
+
+            <h2>Users ({{ users|length }})</h2>
+            <table>
+                <tr>
+                    <th>#</th>
+                    <th>Callsign</th>
+                    <th>Store & Forward</th>
+                    <th>Added</th>
+                    <th>Actions</th>
+                </tr>
+                {% for user in users %}
+                <tr>
+                    <td>{{ loop.index }}</td>
+                    <td>{{ user.callsign }}</td>
+                    <td>{{ '✅ Yes' if user.sf else '❌ No' }}</td>
+                    <td>{{ user.timestamp }}</td>
+                    <td class="actions">
+                        <button onclick="editUser('{{ user.callsign }}', {{ 'true' if user.sf else 'false' }})">Edit</button>
+                        <button class="blacklist-btn" onclick="addToBlacklist('{{ user.callsign }}')">Blacklist</button>
+                        <button class="delete-btn" onclick="deleteUser('{{ user.callsign }}')">Delete</button>
+                    </td>
+                </tr>
+                {% endfor %}
+            </table>
+
+            <h2>Blacklist ({{ blacklist|length }})</h2>
+            <table>
+                <tr>
+                    <th>#</th>
+                    <th>Callsign</th>
+                    <th>Added</th>
+                    <th>Actions</th>
+                </tr>
+                {% for entry in blacklist %}
+                <tr>
+                    <td>{{ loop.index }}</td>
+                    <td>{{ entry.callsign }}</td>
+                    <td>{{ entry.timestamp }}</td>
+                    <td class="actions">
+                        <button class="delete-btn" onclick="removeFromBlacklist('{{ entry.callsign }}')">Remove</button>
+                    </td>
+                </tr>
+                {% endfor %}
+            </table>
+        </body>
+        </html>
+        """
+
+        return render_template_string(html_template, users=users, blacklist=blacklist)
+
+    except Exception as e:
+        app.logger.error(f"🚨 ERROR in /users.html: {e}")
+        return "<h1>Internal Server Error</h1>", 500
+@app.route('/api/users', methods=['POST'])
+def api_add_user():
+    try:
+        data = request.get_json()
+        callsign = data['callsign'].upper().strip()
+        sf = data.get('sf', 1)
+
+        with _connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute('INSERT INTO users (callsign, SF) VALUES (?, ?)', (callsign, sf))
+            conn.commit()
+        return jsonify({'success': True})
+    except Exception as e:
+        app.logger.error(f"🚨 ERROR in /api/users POST: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/users/<callsign>', methods=['PUT'])
+def api_update_user(callsign):
+    try:
+        data = request.get_json()
+        sf = data.get('sf', 1)
+
+        with _connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute('UPDATE users SET SF = ? WHERE callsign = ?', (sf, callsign.upper()))
+            conn.commit()
+        return jsonify({'success': True})
+    except Exception as e:
+        app.logger.error(f"🚨 ERROR in /api/users PUT: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/users/<callsign>', methods=['DELETE'])
+def api_delete_user(callsign):
+    try:
+        with _connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute('DELETE FROM users WHERE callsign = ?', (callsign.upper(),))
+            conn.commit()
+        return jsonify({'success': True})
+    except Exception as e:
+        app.logger.error(f"🚨 ERROR in /api/users DELETE: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/blacklist', methods=['POST'])
+def api_add_blacklist():
+    try:
+        data = request.get_json()
+        callsign = data['callsign'].upper().strip()
+
+        with _connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute('INSERT INTO blacklist (callsign) VALUES (?)', (callsign,))
+            conn.commit()
+        return jsonify({'success': True})
+    except Exception as e:
+        app.logger.error(f"🚨 ERROR in /api/blacklist POST: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/blacklist/<callsign>', methods=['DELETE'])
+def api_delete_blacklist(callsign):
+    try:
+        with _connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute('DELETE FROM blacklist WHERE callsign = ?', (callsign.upper(),))
+            conn.commit()
+        return jsonify({'success': True})
+    except Exception as e:
+        app.logger.error(f"🚨 ERROR in /api/blacklist DELETE: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 # -----------------------------------------------------------------------------
