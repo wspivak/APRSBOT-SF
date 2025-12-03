@@ -29,6 +29,8 @@ This last issue was created since APRS-IS only clients (phones, tablets and comp
 
 <b>Installation and Notes:</b>  
 
+<B> DOES NOT RUN ON TRIXIE UNLESS YOU DOWNGRADE PYTHON </B>
+
 Read the requirements file.  I had to load 99% in a virtual environment and run the program in the same environment.  The replybot.service is configured that way.
 
 Put everything in /opt/aprsbot.  I don't think there is anything hard-coded in Bot.py (some fallbacks), but everything is in aprsbot.conf.
