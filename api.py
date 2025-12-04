@@ -312,9 +312,10 @@ def deduplicate(rows):
 # -----------------------------------------------------------------------------
 # Routes
 # -----------------------------------------------------------------------------
+
 @app.route('/logs')
 def get_logs():
-    # ERLI net aliases - messages to any of these should appear in the log
+    # ERLI net aliases
     ERLI_ALIASES = ['ERLI', 'KC2NJV-4', 'KC2NJV-10']
     
     conn = sqlite3.connect('/opt/aprsbot/erli.db')
@@ -326,11 +327,13 @@ def get_logs():
     cursor.execute(f"""
         SELECT id, timestamp, direction, source, destination, message, msgid, rejected, note, transport
         FROM audit_log
-        WHERE (
-            destination IN ({placeholders})
-            OR message LIKE '%CQ ERLI%'
-            OR destination LIKE 'BLN%'
-        )
+        WHERE direction = 'recv'
+          AND destination IN ({placeholders})
+          AND (
+              LOWER(TRIM(message)) LIKE 'msg %'
+              OR LOWER(TRIM(message)) LIKE 'msg. %'
+              OR LOWER(TRIM(message)) LIKE 'msg cq %'
+          )
           AND timestamp IS NOT NULL
           AND timestamp >= datetime('now', '-7 days')
         ORDER BY timestamp DESC
