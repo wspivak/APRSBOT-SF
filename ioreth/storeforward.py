@@ -149,9 +149,26 @@ def ensure_sf_schema(conn: sqlite3.Connection, logger: Optional[logging.Logger] 
         )
     """)
 
+    # Add audit_log table
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts DATETIME DEFAULT CURRENT_TIMESTAMP,
+            direction TEXT,
+            source TEXT,
+            destination TEXT,
+            message TEXT,
+            msgid TEXT,
+            rejected INTEGER DEFAULT 0,
+            note TEXT,
+            transport TEXT
+        )
+    """)
+
     cur.execute("CREATE INDEX IF NOT EXISTS idx_msg_ack_recipient ON message(ack, recipient)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_msg_ack_msgid     ON message(ack, msgid)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_msg_pending       ON message(ack, recipient, last_attempt_ts)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_audit_ts          ON audit_log(ts)")
     conn.commit()
     if logger: logger.info("Schema ensured/migrated for store_forward.db")
 
@@ -303,6 +320,20 @@ class SFHandler(AprsHandler):
     def __init__(self, svc, my_callsign: str):
         super().__init__(callsign=my_callsign)
         self.svc = svc
+
+
+    def _log_audit(self, direction, source, destination, message, msgid=None, rejected=False, note=None, transport=None):
+        """Audit logging to store_forward.db"""
+        try:
+            cur = self.svc.sf_conn.cursor()
+            cur.execute("""
+                INSERT INTO audit_log (direction, source, destination, message, msgid, rejected, note, transport)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (direction, source, destination, message, msgid, int(rejected), note, transport))
+            self.svc.sf_conn.commit()
+        except Exception as e:
+            self.svc.logger.error(f"Audit log failed: {e}")
+
 
     # Mark stations as heard for any packet types
     def _heard(self, source, via=None):
@@ -686,27 +717,39 @@ class StoreForwardService:
         if now - last_ts < float(self.per_dest_gap_sec):
             time.sleep(float(self.per_dest_gap_sec) - (now - last_ts))
         self._last_send_ts[to_call] = time.monotonic()
-
+        
         if ("{" in payload) and not MSGID_TAIL_RE.search(payload):
             self.logger.error("Refusing malformed tail: %r", payload[-64:])
+            self.handler._log_audit("send", self.my_callsign, to_call, payload,
+                                   rejected=True, note="Malformed msgid tail", transport="NONE")
             return False
-
+        
         frame = self.handler.make_aprs_msg(to_call, payload)
         path = self._choose_tx_path(to_call)
         if not path:
             self.logger.error("No TX path available for %s", to_call)
+            self.handler._log_audit("send", self.my_callsign, to_call, payload,
+                                   rejected=True, note="No TX path available", transport="NONE")
             return False
-
+        
         client = self.clients.get(path)
         try:
             if client and client.is_connected():
                 client.enqueue_frame(frame)
-                self.logger.info("TX [%s]: %s -> %s", ("RF" if path=="rf" else "APRS-IS"), to_call, payload)
+                transport = "RF" if path == "rf" else "APRS-IS"
+                self.logger.info("TX [%s]: %s -> %s", transport, to_call, payload)
+                # Extract msgid from payload for audit log
+                msgid_match = re.search(r'\{([A-Za-z0-9]{1,5})', payload)
+                msgid = msgid_match.group(1) if msgid_match else None
+                self.handler._log_audit("send", self.my_callsign, to_call, payload,
+                                       msgid=msgid, rejected=False, transport=transport)
                 return True
         except Exception as e:
             self.logger.error("Send error via %s: %s", path, e)
+            transport = "RF" if path == "rf" else "APRS-IS"
+            self.handler._log_audit("send", self.my_callsign, to_call, payload,
+                                   rejected=True, note=f"Send error: {str(e)[:100]}", transport=transport)
         return False
-
     def _attempts_expr(self) -> str:
         return "MAX(COALESCE(retries,0), COALESCE(retry_count,0))"
 
