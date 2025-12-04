@@ -18,6 +18,10 @@ from collections import defaultdict
 import configparser
 import os
 
+# ERLI net aliases - messages to any of these should appear in the log
+ERLI_ALIASES = ['ERLI', 'KC2NJV-4', 'KC2NJV-10']
+
+
 # -----------------------------------------------------------------------------
 # QRZ
 # -----------------------------------------------------------------------------
@@ -308,15 +312,44 @@ def deduplicate(rows):
 # -----------------------------------------------------------------------------
 # Routes
 # -----------------------------------------------------------------------------
-@app.route("/logs")
+@app.route('/logs')
 def get_logs():
-    try:
-        rows = fetch_audit_rows()
-        logs = deduplicate(rows)
-        return jsonify(logs)
-    except Exception as e:
-        app.logger.error(f"🚨 ERROR in /logs: {e}")
-        return jsonify({"error": "Internal server error"}), 500
+    # ERLI net aliases - messages to any of these should appear in the log
+    ERLI_ALIASES = ['ERLI', 'KC2NJV-4', 'KC2NJV-10']
+    
+    conn = sqlite3.connect('/opt/aprsbot/erli.db')
+    cursor = conn.cursor()
+    
+    # Build placeholder string for IN clause
+    placeholders = ','.join('?' * len(ERLI_ALIASES))
+    
+    cursor.execute(f"""
+        SELECT id, timestamp, direction, source, destination, message, msgid, rejected, note, transport
+        FROM audit_log
+        WHERE (
+            destination IN ({placeholders})
+            OR message LIKE '%CQ ERLI%'
+            OR destination LIKE 'BLN%'
+        )
+          AND timestamp IS NOT NULL
+          AND timestamp >= datetime('now', '-7 days')
+        ORDER BY timestamp DESC
+    """, ERLI_ALIASES)
+    rows = cursor.fetchall()
+    conn.close()
+
+    # Build response matching your log.php expectations
+    results = []
+    for row in rows:
+        results.append({
+            'timestamp': row[1],
+            'source': row[3],
+            'destinations': row[4],
+            'transport': row[9] or '?',
+            'trimmed_message': (row[5] or '').strip()
+        })
+    
+    return jsonify(results)
 
 
 @app.route("/users")
