@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+
 # -*- coding: utf-8 -*-
 
 """
@@ -327,8 +327,8 @@ class SFHandler(AprsHandler):
         try:
             cur = self.svc.sf_conn.cursor()
             cur.execute("""
-                INSERT INTO audit_log (direction, source, destination, message, msgid, rejected, note, transport)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO audit_log (timestamp,direction, source, destination, message, msgid, rejected, note, transport)
+                VALUES (CURRENT_TIMESTAMP,?, ?, ?, ?, ?, ?, ?, ?)
             """, (direction, source, destination, message, msgid, int(rejected), note, transport))
             self.svc.sf_conn.commit()
         except Exception as e:
@@ -516,7 +516,7 @@ class StoreForwardService:
                 self._last_heard_log_ts[csu] = now_m
         except Exception as e:
             self.logger.warning("last_heard update failed: %s", e)
-    
+
     def _enqueue_seen_once_per_window(self, csu: str):
         now = time.monotonic()
         if now - self._seen_enq_ts.get(csu, 0.0) >= 5.0:
@@ -717,13 +717,13 @@ class StoreForwardService:
         if now - last_ts < float(self.per_dest_gap_sec):
             time.sleep(float(self.per_dest_gap_sec) - (now - last_ts))
         self._last_send_ts[to_call] = time.monotonic()
-        
+
         if ("{" in payload) and not MSGID_TAIL_RE.search(payload):
             self.logger.error("Refusing malformed tail: %r", payload[-64:])
             self.handler._log_audit("send", self.my_callsign, to_call, payload,
                                    rejected=True, note="Malformed msgid tail", transport="NONE")
             return False
-        
+
         frame = self.handler.make_aprs_msg(to_call, payload)
         path = self._choose_tx_path(to_call)
         if not path:
@@ -731,7 +731,7 @@ class StoreForwardService:
             self.handler._log_audit("send", self.my_callsign, to_call, payload,
                                    rejected=True, note="No TX path available", transport="NONE")
             return False
-        
+
         client = self.clients.get(path)
         try:
             if client and client.is_connected():
