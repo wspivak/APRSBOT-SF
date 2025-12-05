@@ -153,7 +153,7 @@ def ensure_sf_schema(conn: sqlite3.Connection, logger: Optional[logging.Logger] 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS audit_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ts DATETIME DEFAULT CURRENT_TIMESTAMP,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
             direction TEXT,
             source TEXT,
             destination TEXT,
@@ -168,7 +168,7 @@ def ensure_sf_schema(conn: sqlite3.Connection, logger: Optional[logging.Logger] 
     cur.execute("CREATE INDEX IF NOT EXISTS idx_msg_ack_recipient ON message(ack, recipient)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_msg_ack_msgid     ON message(ack, msgid)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_msg_pending       ON message(ack, recipient, last_attempt_ts)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_audit_ts          ON audit_log(ts)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_audit_timestamp          ON audit_log(ts)")
     conn.commit()
     if logger: logger.info("Schema ensured/migrated for store_forward.db")
 
