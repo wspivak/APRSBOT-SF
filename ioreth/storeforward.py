@@ -1,4 +1,4 @@
-
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 """
@@ -168,7 +168,7 @@ def ensure_sf_schema(conn: sqlite3.Connection, logger: Optional[logging.Logger] 
     cur.execute("CREATE INDEX IF NOT EXISTS idx_msg_ack_recipient ON message(ack, recipient)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_msg_ack_msgid     ON message(ack, msgid)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_msg_pending       ON message(ack, recipient, last_attempt_ts)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_audit_timestamp          ON audit_log(timestamp)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_audit_timestamp   ON audit_log(timestamp)")
     conn.commit()
     if logger: logger.info("Schema ensured/migrated for store_forward.db")
 
@@ -235,6 +235,8 @@ def load_cfg():
     store_db  = _f("store_forward", "store_db", "/opt/aprsbot/store_forward.db").strip()
     log_file  = _f("store_forward", "log_file", "/opt/aprsbot/logs/sf.log").strip()
     bot_tail  = _f("store_forward", "bot_log_tail", "/opt/aprsbot/logs/replybot.log").strip()
+    # READ THE 'enabled' FLAG:
+    sf_enabled = cfg.getboolean("store_forward", "enabled", fallback=True)
     max_ret   = _fi("store_forward", "max_retries", 3)
     resend_m  = max(1, _fi("store_forward", "resend_delay", 60))
     g_delay   = _ff("store_forward", "delay_send", 5.0)
@@ -272,6 +274,7 @@ def load_cfg():
         "log_file": log_file,
         "bot_tail": bot_tail,
         "max_retries": max_ret,
+        "sf_enabled": sf_enabled,  # Pass the value as sf_enabled
         "resend_delay_min": resend_m,
         "delay_send_sec": g_delay,
         "per_dest_gap_sec": d_gap,
@@ -416,6 +419,7 @@ class StoreForwardService:
         self.store_db_path = P["store_db"]
         self.logger = build_logger(P["log_file"])
         self.bot_log_tail  = P["bot_tail"]
+        self.sf_enabled         = P["sf_enabled"] # STORE THE FLAG HERE
 
         self.max_retries        = P["max_retries"]
         self.resend_delay_min   = P["resend_delay_min"]
@@ -516,7 +520,7 @@ class StoreForwardService:
                 self._last_heard_log_ts[csu] = now_m
         except Exception as e:
             self.logger.warning("last_heard update failed: %s", e)
-
+    
     def _enqueue_seen_once_per_window(self, csu: str):
         now = time.monotonic()
         if now - self._seen_enq_ts.get(csu, 0.0) >= 5.0:
@@ -717,13 +721,13 @@ class StoreForwardService:
         if now - last_ts < float(self.per_dest_gap_sec):
             time.sleep(float(self.per_dest_gap_sec) - (now - last_ts))
         self._last_send_ts[to_call] = time.monotonic()
-
+        
         if ("{" in payload) and not MSGID_TAIL_RE.search(payload):
             self.logger.error("Refusing malformed tail: %r", payload[-64:])
             self.handler._log_audit("send", self.my_callsign, to_call, payload,
                                    rejected=True, note="Malformed msgid tail", transport="NONE")
             return False
-
+        
         frame = self.handler.make_aprs_msg(to_call, payload)
         path = self._choose_tx_path(to_call)
         if not path:
@@ -731,7 +735,7 @@ class StoreForwardService:
             self.handler._log_audit("send", self.my_callsign, to_call, payload,
                                    rejected=True, note="No TX path available", transport="NONE")
             return False
-
+        
         client = self.clients.get(path)
         try:
             if client and client.is_connected():
@@ -798,6 +802,9 @@ class StoreForwardService:
             pass
 
     def process_resends_for(self, csu: str):
+        if not self.sf_enabled: # ADD THIS CHECK
+            self.logger.info("SF OFF: Skipping triggered resend for %s", csu)
+            return
         rows = self._eligible_pending_for(csu)
         if not rows:
             return
@@ -883,6 +890,10 @@ class StoreForwardService:
         self.logger.info("Bulk sweep (%dh) scheduled at %sZ", h, datetime.utcfromtimestamp(self._next_bulk_resend).isoformat())
 
     def process_bulk_resend(self):
+        if not self.sf_enabled:
+            # CORRECTED LOG MESSAGE:
+            self.logger.info("SF OFF: Skipping bulk resend sweep.") 
+            return
         self.logger.info("Starting bulk resend sweep for all recipients")
         cur = self.sf_conn.cursor()
         cur.execute("SELECT DISTINCT recipient FROM message WHERE COALESCE(ack,0)=0")
