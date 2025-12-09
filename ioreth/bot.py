@@ -358,12 +358,27 @@ class BotAprsHandler(aprs.Handler):
         self.db.commit()
         logger.info(f"[SF] Set users.SF={flag} for {cs}")
 
-    def get_sf_flag(self, callsign):
-        cs = callsign.strip().upper().split("-")[0]
+    def get_sf_flag(self, callsign: str) -> int:
+        """
+        Retrieves the SF status for the exact callsign (with SSID).
+        Defaults to 0 (OFF) if the callsign is not found in the users table 
+        (Privacy-first: consent required).
+        """
+        clean_callsign = callsign.strip().upper()
         cur = self.db.cursor()
-        cur.execute("SELECT SF FROM users WHERE callsign = ?", (cs,))
+            
+        # Query for the exact callsign (e.g., KC2NJV-7)
+        cur.execute("SELECT sf FROM users WHERE callsign = ?", (clean_callsign,))
         row = cur.fetchone()
-        return 1 if row is None else (1 if int(row[0]) == 1 else 0)
+          
+        if row is not None:
+            # Case 1: Callsign found. Return its explicit status (0 or 1).
+            # If the 'sf' column is NULL in the DB (old entry), default it to 1 (ON).
+            return row[0] if row[0] is not None else 1
+                
+        # Case 2: Callsign NOT found in the DB.
+        # CRITICAL FIX: The logic must default to 0 (OFF) for consent/privacy.
+        return 0
         
     def _trigger_sf_resend(self, callsign: str):
         """Trigger store-forward daemon to check for messages by updating last_heard."""
