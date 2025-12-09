@@ -346,18 +346,30 @@ class BotAprsHandler(aprs.Handler):
             return None
 
     # ---------------- SF helpers ----------------
-    def set_sf_flag(self, callsign, flag):
-        cs = callsign.strip().upper().split("-")[0]
-        flag = 1 if int(flag) == 1 else 0
+    def set_sf_flag(self, callsign: str, value: int):
+        """
+        Sets the SF status for the EXACT callsign (with SSID) provided.
+        """
+        # CRITICAL FIX: Use the full callsign, do NOT strip the SSID.
+        clean_callsign = callsign.strip().upper()
+            
         cur = self.db.cursor()
-        cur.execute("""
-            INSERT INTO users (callsign, SF)
-            VALUES (?, ?)
-            ON CONFLICT(callsign) DO UPDATE SET SF=excluded.SF
-        """, (cs, flag))
+           
+        # Use the callsign in the database check/update.
+        cur.execute("SELECT 1 FROM users WHERE callsign = ?", (clean_callsign,))
+           
+        if not cur.fetchone():
+            # If the specific SSID is not in the table, insert it.
+            cur.execute("INSERT INTO users (callsign, sf) VALUES (?, ?)", (clean_callsign, value))
+        else:
+            # If the specific SSID is found, update its SF status.
+            cur.execute("UPDATE users SET sf = ? WHERE callsign = ?", (value, clean_callsign))
+                
         self.db.commit()
-        logger.info(f"[SF] Set users.SF={flag} for {cs}")
-
+           
+        # The log will now correctly show KC2NJV-7
+        logger.info(f"[SF] Set users.SF={value} for {clean_callsign}")
+        
     def get_sf_flag(self, callsign: str) -> int:
         """
         Retrieves the SF status for the exact callsign (with SSID).
