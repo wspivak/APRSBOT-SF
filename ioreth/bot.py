@@ -912,8 +912,10 @@ class BotAprsHandler(aprs.Handler):
             try:
                 sf_allowed = (self.get_sf_flag(to_call) == 1)
             except Exception as e:
-                logger.error(f"[SF] Failed to read users.SF for {to_call}: {e}")
-                sf_allowed = True
+                logger.error(f"[SF] Failed to read users.SF for {to_call}: {e}. Defaulting to OFF (Skip Storage).")
+                sf_allowed = False
+                #logger.error(f"[SF] Failed to read users.SF for {to_call}: {e}")
+                #sf_allowed = True
 
             if sf_allowed:
                 try:
