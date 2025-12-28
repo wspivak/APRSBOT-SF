@@ -630,21 +630,55 @@ class StoreForwardService:
         return tok
 
     def _compute_filter_tokens(self) -> List[str]:
+        """
+        Compute APRS-IS filter tokens.
+        
+        For wide-area nets with large radius filters (r/lat/lon/radius),
+        we rely solely on the base filter and handle user eligibility 
+        in Python via _mark_seen_generic(). This avoids filter complexity
+        issues with APRS-IS servers.
+        
+        Individual user filters (b/, p/, m/) are only added if there's 
+        no range filter present in the base configuration.
+        """
         base = self._base_filter_raw or "t/pmso"
         base_toks = [self._sanitize_filter_token(t) for t in base.split() if t.strip()]
         base_toks = [t for t in base_toks if t]
-
+        
+        # Check if base filter contains a range filter (r/lat/lon/radius)
+        has_range_filter = any(tok.startswith('r/') for tok in base_toks)
+        
+        if has_range_filter:
+            # Wide-area coverage mode: base filter only
+            # User eligibility is handled in _mark_seen_generic()
+            self.logger.info(
+                "Range filter detected in base - using simplified filter "
+                "(%d tokens). User filtering handled in Python.",
+                len(base_toks)
+            )
+            return base_toks
+        
+        # No range filter: add specific user/alias filters for targeted coverage
+        self.logger.info("No range filter - building user-specific filters")
+        
         calls_full = set(self.users) | set(self.aliases)
         bases = {base_call(c) for c in calls_full}
-
-        # Budlist/prefix
+        
+        # Budlist/prefix filters
         b_tokens = [f"b/{u}" for u in sorted(calls_full)]
         p_tokens = [f"p/{b}" for b in sorted(bases)]
-
+        
         # Messages addressed TO any of our calls/aliases/users
         m_tokens = [f"m/{c}" for c in sorted(calls_full | bases)]
-
-        return base_toks + b_tokens + p_tokens + m_tokens
+        
+        combined = base_toks + b_tokens + p_tokens + m_tokens
+        self.logger.info(
+            "Built targeted filter with %d tokens "
+            "(%d base + %d budlist + %d prefix + %d message)",
+            len(combined), len(base_toks), len(b_tokens), len(p_tokens), len(m_tokens)
+        )
+        
+        return combined
 
     def _apply_combined_filter_if_needed(self):
         ic = self.clients.get("aprsis")
