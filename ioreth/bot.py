@@ -590,9 +590,8 @@ class BotAprsHandler(aprs.Handler):
                 # Import weather module (lazy load)
                 from .weather import WeatherForecast
                 
-                # Get API key from config if available
+                # Get API key from config
                 api_key = None
-                # Re-read config to get weather section
                 cfg = configparser.ConfigParser(inline_comment_prefixes=(';', '#'))
                 cfg.optionxform = str
                 cfg.read(self._config_file)
@@ -606,7 +605,36 @@ class BotAprsHandler(aprs.Handler):
                 wx_service = WeatherForecast(openweathermap_api_key=api_key)
                 forecast = wx_service.get_forecast(args)
                 
-                self.send_aprs_msg(clean_source, forecast)
+                # --- SMART CHUNKING START ---
+                # Split by punctuation (. or ,) but keep the delimiter
+                import re
+                raw_chunks = re.split(r'([.,])', forecast)
+                
+                processed_chunks = []
+                current_msg = ""
+                
+                for i in range(0, len(raw_chunks)-1, 2):
+                    phrase = raw_chunks[i] + (raw_chunks[i+1] if i+1 < len(raw_chunks) else "")
+                    phrase = phrase.strip()
+                    
+                    # If adding this phrase stays under 45 chars, append it
+                    if len(current_msg) + len(phrase) < 45:
+                        current_msg += (" " if current_msg else "") + phrase
+                    else:
+                        # Send the full message and start a new one
+                        if current_msg:
+                            processed_chunks.append(current_msg)
+                        current_msg = phrase
+
+                if current_msg:
+                    processed_chunks.append(current_msg)
+
+                # Send each chunk as a separate APRS message
+                for chunk in processed_chunks:
+                    self.send_aprs_msg(clean_source, chunk)
+                    time.sleep(0.7) # Slightly longer delay for RF stability
+                # --- SMART CHUNKING END ---
+                
                 return True
                 
             except ImportError as e:
