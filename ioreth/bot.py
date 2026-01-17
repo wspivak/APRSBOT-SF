@@ -49,7 +49,15 @@ CREATE TABLE IF NOT EXISTS dedup_cache (
 
 def _is_duplicate(conn, source, dest, text):
     now = int(time.time())
-    key = (str(source).strip().lower(), str(dest).strip().lower(), str(text).strip().lower())
+    # Strip non-ASCII characters (emojis, special chars) before dedup comparison
+    def strip_non_ascii(s):
+        return ''.join(char for char in str(s) if ord(char) < 128)
+    
+    clean_source = strip_non_ascii(source).strip().lower()
+    clean_dest = strip_non_ascii(dest).strip().lower()
+    clean_text = strip_non_ascii(text).strip().lower()
+    
+    key = (clean_source, clean_dest, clean_text)
     try:
         conn.execute("DELETE FROM dedup_cache WHERE ? - msg_time > ?", (now, DEDUP_TTL))
         cur = conn.execute("SELECT 1 FROM dedup_cache WHERE source=? AND destination=? AND text=?", key)
